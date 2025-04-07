@@ -70,7 +70,7 @@ async def control_plug(plug, state: PlugState, poll_interval):
             state.last_state = "cooldown"
             state.timer = state.cooldown_duration
         else:
-            logger.info(f"[{state.name}] Relay on.")
+            logger.info(f"[{state.name}] Charging. Relay on.")
             state.last_state = "on"
             state.timer = 0
 
