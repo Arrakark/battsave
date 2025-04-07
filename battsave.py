@@ -28,8 +28,8 @@ class PlugState:
     def reset_timer(self):
         self.timer = 0
 
-async def get_device_map(username, password):
-    devices = await Discover.discover(username=username, password=password)
+async def get_device_map(username, password, interface):
+    devices = await Discover.discover(username=username, password=password, interface=interface)
     result = {}
     for dev in devices.values():
         try:
@@ -87,6 +87,7 @@ async def main():
 
     poll_interval = int(config["global"].get("poll_interval", 10))
     lost_contact_count = int(config["global"].get("lost_contact_count", 1))
+    interface = int(config["global"].get("interface", "eth0"))
     username = config["global"].get("username")
     password = config["global"].get("password")
 
@@ -105,7 +106,7 @@ async def main():
     logger.info("Starting battery saver control loop.")
 
     while True:
-        device_map = await get_device_map(username, password)
+        device_map = await get_device_map(username, password, interface)
 
         for name, state in plug_states.items():
             if not state.enabled:
