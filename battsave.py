@@ -46,7 +46,7 @@ async def control_plug(plug, state: PlugState):
     try:
         await plug.update()
         if not plug.is_on:
-            logger.info(f"[{state.name}] Relay on for sampling.")
+            logger.info(f"[{state.name}] Turning relay on for sampling.")
             await plug.turn_on()
             await asyncio.sleep(1)
 
@@ -66,16 +66,16 @@ async def control_plug(plug, state: PlugState):
         logger.info(f"[{state.name}] Average power: {avg_power:.2f} W")
 
         if any(x == 0.0 for x in readings[1:]):
-            logger.info(f"[{state.name}] Device plugged/unplugged. Keeping relay on.")
+            logger.info(f"[{state.name}] Device recently started charging. Keeping relay on.")
             return
 
         if avg_power < state.power_threshold:
-            logger.info(f"[{state.name}] Below threshold. Relay off.")
+            logger.info(f"[{state.name}] Below threshold. Turning relay off.")
             await plug.turn_off()
             state.last_state = "cooldown"
             state.timer = state.cooldown_duration
         else:
-            logger.info(f"[{state.name}] Charging. Keeping relay on.")
+            logger.info(f"[{state.name}] Above threshold. Keeping relay on.")
             state.last_state = "on"
             state.timer = 0
 
@@ -90,11 +90,11 @@ async def main():
     if not config.has_section("global"):
         logger.error("Missing [global] section in config file.")
         return
-    
+
     if not config['global'].get("username"):
         logger.error("Missing username in [global] section in config file.")
         return
-    
+
     if not config['global'].get("password"):
         logger.error("Missing password in [global] section in config file.")
         return
@@ -120,7 +120,10 @@ async def main():
 
     logger.info("Starting battery saver control loop.")
 
+    cycle_interval = 60.0  # Fixed interval for each main loop cycle (in seconds)
     while True:
+        cycle_start = time.monotonic()  # Record start of cycle
+
         for name, state in plug_states.items():
             if not state.enabled:
                 continue
@@ -141,20 +144,26 @@ async def main():
                     state.timer = 0
                     state.last_state = "on"
                 else:
+                    logger.info(f"[{name}] Cooldown: {state.timer} min remaining.")
                     state.timer -= 1
-                    logger.info(f"[{name}] Cooldown: {state.timer} seconds remaining.")
             else:
                 await control_plug(plug, state)
 
-        await asyncio.sleep(1)
+        # Calculate elapsed time and adjust sleep to maintain cycle_interval
+        elapsed = time.monotonic() - cycle_start
+        sleep_duration = cycle_interval - elapsed
+        if sleep_duration > 0:
+            await asyncio.sleep(sleep_duration)
+        else:
+            # If processing took longer than the cycle_interval, log a warning and continue immediately
+            logger.info(f"Cycle overran by {-sleep_duration:.2f} seconds.")
 
-
-def main_wrapper():
+async def main_wrapper():
     try:
-        asyncio.run(main())
+        await main()
     except KeyboardInterrupt:
         logger.info("Shutting down.")
 
 
 if __name__ == "__main__":
-    main_wrapper()
+    asyncio.run(main_wrapper())
