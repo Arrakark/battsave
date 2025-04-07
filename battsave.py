@@ -39,7 +39,7 @@ async def get_device_map(username, password, interface):
             logger.warning(f"Failed to update device during discovery: {e}")
     return result
 
-async def control_plug(plug, state: PlugState, lost_contact_count, poll_interval):
+async def control_plug(plug, state: PlugState, poll_interval):
     try:
         await plug.update()
         if not plug.is_on:
@@ -86,7 +86,6 @@ async def main():
         return
 
     poll_interval = int(config["global"].get("poll_interval", 10))
-    lost_contact_count = int(config["global"].get("lost_contact_count", 1))
     interface = config["global"].get("interface", "eth0")
     username = config["global"].get("username")
     password = config["global"].get("password")
@@ -121,7 +120,7 @@ async def main():
                 state.timer -= poll_interval
                 logger.info(f"[{name}] Cooldown: {state.timer} samples remaining.")
             else:
-                await control_plug(plug, state, lost_contact_count, poll_interval)
+                await control_plug(plug, state, poll_interval)
 
         await asyncio.sleep(poll_interval)
 
