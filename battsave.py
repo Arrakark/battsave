@@ -87,7 +87,7 @@ async def main():
 
     poll_interval = int(config["global"].get("poll_interval", 10))
     lost_contact_count = int(config["global"].get("lost_contact_count", 1))
-    interface = int(config["global"].get("interface", "eth0"))
+    interface = config["global"].get("interface", "eth0")
     username = config["global"].get("username")
     password = config["global"].get("password")
 
