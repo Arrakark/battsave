@@ -1,9 +1,11 @@
 import asyncio
 import configparser
 import logging
-import time
-from kasa import Discover
 import logging.config
+import time
+from kasa import SmartPlug, Discover
+
+# Disable existing loggers to suppress noisy libs
 logging.config.dictConfig({
     'version': 1,
     'disable_existing_loggers': True,
@@ -13,12 +15,13 @@ logging.config.dictConfig({
 logger = logging.getLogger('battsave')
 logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(levelname)s: %(message)s')
 
+
 class PlugState:
-    def __init__(self, name, config):
+    def __init__(self, name, ip_address, config):
         self.name = name
+        self.ip_address = ip_address
         self.sample_duration = int(config.get("sample_duration", 300))
         self.cooldown_duration = int(config.get("cooldown_duration", 600))
-        self.keep_charging_if_unplugged = config.get("keep_charging_if_unplugged", "false").lower() == "true"
         self.power_threshold = float(config.get("power_threshold", 5.0))
         self.enabled = config.get("enabled", "true").lower() == "true"
 
@@ -28,54 +31,57 @@ class PlugState:
     def reset_timer(self):
         self.timer = 0
 
-async def get_device_map(username, password, interface):
-    devices = await Discover.discover(username=username, password=password, interface=interface)
-    result = {}
-    for dev in devices.values():
-        try:
-            await dev.update()
-            result[dev.alias] = dev
-        except Exception as e:
-            logger.warning(f"Failed to update device during discovery: {e}")
-    return result
 
-async def control_plug(plug, state: PlugState, poll_interval):
+async def get_device(ip, name, username, password):
+    try:
+        plug = await Discover.discover_single(ip, username=username, password=password)
+        await plug.update()
+        return plug
+    except Exception as e:
+        logger.warning(f"[{name}] Could not connect to {ip}: {e}")
+        return None
+
+
+async def control_plug(plug, state: PlugState):
     try:
         await plug.update()
         if not plug.is_on:
-            logger.info(f"[{state.name}] Turning on for sampling.")
+            logger.info(f"[{state.name}] Relay on for sampling.")
             await plug.turn_on()
-            await asyncio.sleep(1)  # small delay to allow state update
+            await asyncio.sleep(1)
 
-        sample_interval = poll_interval  # seconds between power samples
         readings = []
-        num_samples = state.sample_duration // sample_interval
+        num_samples = state.sample_duration
 
         for i in range(num_samples):
             await plug.update()
-            power = plug.emeter_realtime.get("power_mw", 0) / 1000
+            try:
+                power = plug.emeter_realtime.get("power_mw", 0) / 1000
+            except Exception:
+                power = 0.0
             readings.append(power)
-            # logger.info(f"[{state.name}] Sample {i+1}: {power:.2f} W")
-            await asyncio.sleep(sample_interval)
+            await asyncio.sleep(1)
 
-        avg_power = sum(readings[1:]) / max(1, len(readings) - 1)  # exclude first sample
+        avg_power = sum(readings[1:]) / max(1, len(readings) - 1)
         logger.info(f"[{state.name}] Average power: {avg_power:.2f} W")
 
-        if state.keep_charging_if_unplugged and any(x == 0.0 for x in readings[1:]):
-            logger.info(f"[{state.name}] Device unplugged. Relay on.")
-            pass
-        elif avg_power < state.power_threshold:
+        if any(x == 0.0 for x in readings[1:]):
+            logger.info(f"[{state.name}] Device plugged/unplugged. Keeping relay on.")
+            return
+
+        if avg_power < state.power_threshold:
             logger.info(f"[{state.name}] Below threshold. Relay off.")
             await plug.turn_off()
             state.last_state = "cooldown"
             state.timer = state.cooldown_duration
         else:
-            logger.info(f"[{state.name}] Charging. Relay on.")
+            logger.info(f"[{state.name}] Charging. Keeping relay on.")
             state.last_state = "on"
             state.timer = 0
 
     except Exception as e:
-        logger.warning(f"[{state.name}] Error: {e}")
+        logger.warning(f"[{state.name}] Error during control: {e}")
+
 
 async def main():
     config = configparser.ConfigParser()
@@ -84,19 +90,29 @@ async def main():
     if not config.has_section("global"):
         logger.error("Missing [global] section in config file.")
         return
+    
+    if not config['global'].get("username"):
+        logger.error("Missing username in [global] section in config file.")
+        return
+    
+    if not config['global'].get("password"):
+        logger.error("Missing password in [global] section in config file.")
+        return
 
-    poll_interval = int(config["global"].get("poll_interval", 10))
-    interface = config["global"].get("interface", "eth0")
-    username = config["global"].get("username")
-    password = config["global"].get("password")
+    username = config['global'].get('username')
+    password = config['global'].get('password')
 
     plug_states = {}
 
-    # Load config for each plug
+    # Parse plug configuration
     for section in config.sections():
         if section.startswith("plug:"):
             name = section.split(":", 1)[1]
-            plug_states[name] = PlugState(name, config[section])
+            ip_address = config[section].get("ip")
+            if not ip_address:
+                logger.warning(f"[{name}] No IP specified.")
+                continue
+            plug_states[name] = PlugState(name, ip_address, config[section])
 
     if not plug_states:
         logger.error("No plug configurations found. Use [plug:<name>] sections in the ini file.")
@@ -105,30 +121,40 @@ async def main():
     logger.info("Starting battery saver control loop.")
 
     while True:
-        device_map = await get_device_map(username, password, interface)
-
         for name, state in plug_states.items():
             if not state.enabled:
                 continue
-            plug = device_map.get(name)
+
+            plug = await get_device(state.ip_address, name, username, password)
             if not plug:
-                logger.info(f"[{name}] Plug not found on network. Cooldown reset.")
-                state.reset_timer()
+                continue
+
+            try:
+                await plug.update()
+            except Exception as e:
+                logger.warning(f"[{name}] Failed to update plug: {e}")
                 continue
 
             if state.last_state == "cooldown" and state.timer > 0:
-                state.timer -= poll_interval
-                logger.info(f"[{name}] Cooldown: {state.timer} samples remaining.")
+                if plug.is_on:
+                    logger.info(f"[{name}] Plug is on during cooldown. Resetting timer.")
+                    state.timer = 0
+                    state.last_state = "on"
+                else:
+                    state.timer -= 1
+                    logger.info(f"[{name}] Cooldown: {state.timer} seconds remaining.")
             else:
-                await control_plug(plug, state, poll_interval)
+                await control_plug(plug, state)
 
-        await asyncio.sleep(poll_interval)
+        await asyncio.sleep(1)
+
 
 def main_wrapper():
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        logging.info("Shutting down.")
+        logger.info("Shutting down.")
+
 
 if __name__ == "__main__":
     main_wrapper()
